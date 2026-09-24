@@ -52,12 +52,16 @@ export async function purgeDeletedAccounts(): Promise<void> {
         [account.id]
       );
       await client.query(
-        `UPDATE comments SET status = 'deleted', deleted_at = now(), updated_at = now()
+        `UPDATE comments
+         SET status = 'deleted', deleted_at = now(), updated_at = now(),
+             hidden_by = NULL, hidden_by_level = NULL, hidden_reason_code = NULL, hidden_at = NULL
          WHERE author_id = $1 AND deleted_at IS NULL`,
         [account.id]
       );
       await client.query(
-        `UPDATE map_features SET status = 'deleted', deleted_at = now(), updated_at = now()
+        `UPDATE map_features
+         SET status = 'deleted', deleted_at = now(), updated_at = now(),
+             hidden_by = NULL, hidden_by_level = NULL, hidden_reason_code = NULL, hidden_at = NULL
          WHERE owner_id = $1 AND deleted_at IS NULL`,
         [account.id]
       );

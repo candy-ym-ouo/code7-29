@@ -2,17 +2,24 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { moderationDecisionSchema } from "@map/shared/contracts";
 import { query, transaction } from "../db";
-import { AppError, conflict, notFound } from "../errors";
+import { conflict, notFound } from "../errors";
 import { requireAdmin, requireModerator } from "../auth";
 import { recordAudit } from "../audit";
 import { notifyUser } from "../notifications";
+import {
+  assertCanPublish,
+  hideContent,
+  restoreContent,
+  type HideLevel
+} from "../moderation-state";
 
 export async function moderationRoutes(app: FastifyInstance) {
   app.get("/moderation/queue", { preHandler: requireModerator }, async () => {
     const [features, comments, media, reports] = await Promise.all([
       query(
         `SELECT fr.id AS revision_id, fr.feature_id, fr.revision_no, fr.payload, fr.submitted_at,
-                mf.category_key, mf.status AS feature_status, u.display_name AS author_name
+                mf.category_key, mf.status AS feature_status,
+                mf.hidden_by_level AS feature_hidden_by_level, u.display_name AS author_name
          FROM feature_revisions fr
          JOIN map_features mf ON mf.id = fr.feature_id
          JOIN users u ON u.id = fr.author_id
@@ -21,7 +28,8 @@ export async function moderationRoutes(app: FastifyInstance) {
          LIMIT 100`
       ),
       query(
-        `SELECT c.id, c.feature_id, c.body, c.status, c.created_at, u.display_name AS author_name
+        `SELECT c.id, c.feature_id, c.body, c.status, c.created_at,
+                c.hidden_by_level, u.display_name AS author_name
          FROM comments c JOIN users u ON u.id = c.author_id
          WHERE c.status = 'pending' AND c.deleted_at IS NULL
          ORDER BY c.created_at ASC LIMIT 100`
@@ -68,11 +76,27 @@ export async function moderationRoutes(app: FastifyInstance) {
          FROM feature_revisions fr
          JOIN map_features mf ON mf.id = fr.feature_id
          WHERE fr.feature_id = $1 AND fr.status = 'pending' AND mf.deleted_at IS NULL
-         ORDER BY fr.revision_no DESC LIMIT 1 FOR UPDATE`,
+         ORDER BY fr.revision_no DESC LIMIT 1 FOR UPDATE OF fr`,
         [params.id]
       );
       const revision = revisionResult.rows[0];
       if (!revision) throw notFound("Pending revision not found");
+
+      // 锁定 feature 行，批准修订会重新公开内容，必须通过统一发布守卫：
+      // 管理员隐藏的内容不能由审核员借批准修订重新公开。
+      const featureResult = await client.query<{
+        status: string;
+        deleted_at: Date | null;
+        hidden_by_level: HideLevel | null;
+        hidden_reason_code: string | null;
+      }>(
+        `SELECT status, deleted_at, hidden_by_level, hidden_reason_code
+         FROM map_features WHERE id = $1 FOR UPDATE`,
+        [params.id]
+      );
+      const feature = featureResult.rows[0];
+      if (!feature || feature.deleted_at) throw notFound("Feature not found");
+      const publishGuard = assertCanPublish("feature", feature, request.user!.role);
 
       const mediaIds = revision.payload.mediaIds ?? [];
       if (mediaIds.length) {
@@ -96,6 +120,10 @@ export async function moderationRoutes(app: FastifyInstance) {
         `UPDATE map_features
          SET current_revision_id = $2,
              status = 'published',
+             hidden_by = NULL,
+             hidden_by_level = NULL,
+             hidden_reason_code = NULL,
+             hidden_at = NULL,
              category_key = $3,
              geom = ST_SetSRID(ST_MakePoint($4, $5), 4326)::geography,
              location_accuracy_m = $6,
@@ -118,8 +146,22 @@ export async function moderationRoutes(app: FastifyInstance) {
         action: "feature.approved",
         resourceType: "feature",
         resourceId: params.id,
-        metadata: { revisionId: revision.id }
+        metadata: {
+          revisionId: revision.id,
+          restoredFromHidden: publishGuard.restoringFromHidden,
+          previousHiddenByLevel: publishGuard.hiddenByLevel
+        }
       });
+      await client.query(
+        `INSERT INTO moderation_actions(target_type, target_id, moderator_id, action, before_state, after_state)
+         VALUES ('feature', $1, $2, 'revision_approved', $3::jsonb, $4::jsonb)`,
+        [
+          params.id,
+          request.user!.id,
+          JSON.stringify({ status: feature.status, hiddenByLevel: feature.hidden_by_level }),
+          JSON.stringify({ status: "published", hiddenByLevel: null, revisionId: revision.id })
+        ]
+      );
       await notifyUser(client, {
         userId: revision.author_id,
         type: "feature_approved",
@@ -209,21 +251,14 @@ export async function moderationRoutes(app: FastifyInstance) {
     const params = z.object({ id: z.string().uuid() }).parse(request.params);
     const input = moderationDecisionSchema.parse(request.body);
     await transaction(async (client) => {
-      const result = await client.query(
-        "UPDATE map_features SET status = 'hidden', updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING owner_id, current_revision_id",
-        [params.id]
-      );
-      const feature = result.rows[0];
-      if (!feature) throw notFound("Feature not found");
-      await recordAudit(client, {
+      const result = await hideContent(client, "feature", params.id, {
         actorId: request.user!.id,
-        action: "feature.hidden",
-        resourceType: "feature",
-        resourceId: params.id,
-        metadata: { reasonCode: input.reasonCode, notes: input.notes }
+        actorRole: request.user!.role,
+        reasonCode: input.reasonCode,
+        notes: input.notes
       });
       await notifyUser(client, {
-        userId: feature.owner_id,
+        userId: result.ownerId,
         type: "feature_hidden",
         title: "你的地点细节已被隐藏",
         body: `${input.reasonCode}${input.notes ? `：${input.notes}` : ""}`,
@@ -236,19 +271,17 @@ export async function moderationRoutes(app: FastifyInstance) {
   app.post("/moderation/features/:id/restore", { preHandler: requireAdmin }, async (request) => {
     const params = z.object({ id: z.string().uuid() }).parse(request.params);
     await transaction(async (client) => {
-      const result = await client.query<{ current_revision_id: string | null }>(
-        "SELECT current_revision_id FROM map_features WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
-        [params.id]
-      );
-      const feature = result.rows[0];
-      if (!feature) throw notFound("Feature not found");
-      if (!feature.current_revision_id) throw conflict("Feature has no approved revision");
-      await client.query("UPDATE map_features SET status = 'published', updated_at = now() WHERE id = $1", [params.id]);
-      await recordAudit(client, {
+      const result = await restoreContent(client, "feature", params.id, {
         actorId: request.user!.id,
-        action: "feature.restored",
-        resourceType: "feature",
-        resourceId: params.id
+        actorRole: request.user!.role,
+        reasonCode: "MANUAL_RESTORE"
+      });
+      await notifyUser(client, {
+        userId: result.ownerId,
+        type: "feature_restored",
+        title: "你的地点细节已恢复公开",
+        body: "管理员复核后已恢复该内容。",
+        link: `/features/${params.id}`
       });
     });
     return { status: "published" };
@@ -316,20 +349,28 @@ export async function moderationRoutes(app: FastifyInstance) {
     const params = z.object({ id: z.string().uuid() }).parse(request.params);
     const input = moderationDecisionSchema.parse(request.body);
     await transaction(async (client) => {
-      const result = await client.query(
-        "UPDATE comments SET status = 'hidden', updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id",
-        [params.id]
-      );
-      if (!result.rowCount) throw notFound("Comment not found");
-      await recordAudit(client, {
+      await hideContent(client, "comment", params.id, {
         actorId: request.user!.id,
-        action: "comment.hidden",
-        resourceType: "comment",
-        resourceId: params.id,
-        metadata: { reasonCode: input.reasonCode, notes: input.notes }
+        actorRole: request.user!.role,
+        reasonCode: input.reasonCode,
+        notes: input.notes
       });
     });
     return { status: "hidden" };
+  });
+
+  // 评论恢复同样受统一隐藏来源守卫；端点限管理员，审核员仅可在处理举报时
+  // 恢复 system/moderator 级隐藏（见 reports/:id/resolve）。
+  app.post("/moderation/comments/:id/restore", { preHandler: requireAdmin }, async (request) => {
+    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    await transaction(async (client) => {
+      await restoreContent(client, "comment", params.id, {
+        actorId: request.user!.id,
+        actorRole: request.user!.role,
+        reasonCode: "MANUAL_RESTORE"
+      });
+    });
+    return { status: "published" };
   });
 
   app.post("/moderation/reports/:id/resolve", { preHandler: requireModerator }, async (request) => {
@@ -341,22 +382,42 @@ export async function moderationRoutes(app: FastifyInstance) {
     }).parse(request.body);
 
     await transaction(async (client) => {
-      const reportResult = await client.query<{ target_type: string; target_id: string; reporter_id: string }>(
-        "SELECT target_type, target_id, reporter_id FROM reports WHERE id = $1 AND status = 'open' FOR UPDATE",
+      const reportResult = await client.query<{ target_type: "feature" | "comment"; target_id: string; reporter_id: string; reason_code: string }>(
+        "SELECT target_type, target_id, reporter_id, reason_code FROM reports WHERE id = $1 AND status = 'open' FOR UPDATE",
         [params.id]
       );
       const report = reportResult.rows[0];
       if (!report) throw notFound("Open report not found");
 
       if (input.action === "hide") {
-        const table = report.target_type === "feature" ? "map_features" : "comments";
-        await client.query(`UPDATE ${table} SET status = 'hidden', updated_at = now() WHERE id = $1`, [report.target_id]);
+        // 复用统一隐藏入口：只有已发布内容可隐藏，隐藏级别取自操作者角色。
+        await hideContent(client, report.target_type, report.target_id, {
+          actorId: request.user!.id,
+          actorRole: request.user!.role,
+          reasonCode: `REPORT:${report.reason_code}`.slice(0, 64),
+          notes: input.notes,
+          metadata: { reportId: params.id }
+        });
       }
       if (input.action === "restore") {
-        if (report.target_type === "feature") {
-          await client.query("UPDATE map_features SET status = 'published', updated_at = now() WHERE id = $1 AND current_revision_id IS NOT NULL", [report.target_id]);
-        } else {
-          await client.query("UPDATE comments SET status = 'published', updated_at = now() WHERE id = $1", [report.target_id]);
+        // 统一恢复守卫：管理员隐藏的目标在此对审核员返回 403，
+        // 举报处理不能成为绕过 /restore 端点角色限制的旁路。
+        const restored = await restoreContent(client, report.target_type, report.target_id, {
+          actorId: request.user!.id,
+          actorRole: request.user!.role,
+          reasonCode: `REPORT_REVIEW:${report.reason_code}`.slice(0, 64),
+          notes: input.notes,
+          metadata: { reportId: params.id }
+        });
+        if (restored.hiddenByLevel === "system") {
+          // 系统因举报阈值隐藏后经举报复核恢复，通知被误隐藏的作者。
+          await notifyUser(client, {
+            userId: restored.ownerId,
+            type: report.target_type === "feature" ? "feature_restored" : "comment_restored",
+            title: report.target_type === "feature" ? "你的地点细节已恢复公开" : "你的评论已恢复显示",
+            body: "举报复核完成，内容已恢复。",
+            link: report.target_type === "feature" ? `/features/${restored.id}` : "/me/comments"
+          });
         }
       }
 

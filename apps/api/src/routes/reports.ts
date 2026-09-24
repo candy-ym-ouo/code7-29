@@ -4,8 +4,8 @@ import { reportCreateSchema } from "@map/shared/contracts";
 import { query, transaction } from "../db";
 import { AppError, conflict, notFound } from "../errors";
 import { requireAuth } from "../auth";
-import { recordAudit } from "../audit";
 import { notifyUser } from "../notifications";
+import { hideContent } from "../moderation-state";
 
 export async function reportRoutes(app: FastifyInstance) {
   app.post("/reports", { preHandler: requireAuth }, async (request, reply) => {
@@ -45,18 +45,29 @@ export async function reportRoutes(app: FastifyInstance) {
         [input.targetType, input.targetId]
       );
       if (count.rows[0]!.count >= 3) {
-        if (input.targetType === "feature") {
-          await client.query("UPDATE map_features SET status = 'hidden', updated_at = now() WHERE id = $1", [input.targetId]);
-        } else {
-          await client.query("UPDATE comments SET status = 'hidden', updated_at = now() WHERE id = $1", [input.targetId]);
-        }
-        await recordAudit(client, {
+        // 系统级自动隐藏：只有仍在公开的内容才会被阈值隐藏，
+        // 人工（尤其管理员）隐藏不会被并发展开的举报计数覆盖。
+        const hidden = await hideContent(client, input.targetType, input.targetId, {
           actorId: null,
-          action: "report.threshold_hidden",
-          resourceType: input.targetType,
-          resourceId: input.targetId,
+          actorRole: "system",
+          reasonCode: "REPORT_THRESHOLD",
+          notes: input.notes ?? null,
           metadata: { openReports: count.rows[0]!.count }
+        }).catch((error: unknown) => {
+          // 目标已被人工隐藏/删除或在本事务中并发变更时不阻断举报落库；
+          // hideContent 在抛错前不会产生失败的 SQL，事务仍可继续。
+          if (error instanceof AppError) return null;
+          throw error;
         });
+        if (hidden?.changed) {
+          await notifyUser(client, {
+            userId: ownerId!,
+            type: input.targetType === "feature" ? "feature_hidden" : "comment_hidden",
+            title: input.targetType === "feature" ? "你的地点细节已被临时隐藏" : "你的评论已被临时隐藏",
+            body: "因多人举报，内容已临时隐藏并进入人工复核。",
+            link: input.targetType === "feature" ? `/features/${input.targetId}` : "/me/comments"
+          });
+        }
       }
       if (ownerId && ownerId !== request.user!.id) {
         await notifyUser(client, {

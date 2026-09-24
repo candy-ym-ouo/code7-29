@@ -81,10 +81,13 @@
 | `POST` | `/moderation/features/:id/approve` | 批准内容或修订 |
 | `POST` | `/moderation/features/:id/reject` | 拒绝 |
 | `POST` | `/moderation/features/:id/request-changes` | 要求修改 |
-| `POST` | `/moderation/features/:id/hide` | 隐藏 |
-| `POST` | `/moderation/features/:id/restore` | 管理员恢复 |
+| `POST` | `/moderation/features/:id/hide` | 隐藏（审核员=moderator 级，管理员=admin 级） |
+| `POST` | `/moderation/features/:id/restore` | 管理员恢复；admin 级隐藏只有管理员可恢复 |
 | `POST` | `/moderation/comments/:id/approve` | 批准评论 |
 | `POST` | `/moderation/comments/:id/reject` | 拒绝评论 |
-| `POST` | `/moderation/comments/:id/hide` | 隐藏评论 |
-| `POST` | `/moderation/reports/:id/resolve` | 处理举报 |
+| `POST` | `/moderation/comments/:id/hide` | 隐藏评论（级别同地点内容） |
+| `POST` | `/moderation/comments/:id/restore` | 管理员恢复评论 |
+| `POST` | `/moderation/reports/:id/resolve` | 处理举报；`action=restore` 同样受隐藏级别守卫，审核员不能借此恢复 admin 级隐藏 |
 | `GET` | `/moderation/audit` | 管理员审计日志 |
+
+隐藏状态携带来源级别（`system` 举报阈值自动隐藏 / `moderator` 审核员隐藏 / `admin` 管理员隐藏）、操作者、原因码和时间，由数据库约束保证一致性。批准修订、举报处理等任何会让内容重新公开的路径都经过同一权限守卫：审核员只能逆转 `system`/`moderator` 级隐藏；被 `admin` 级隐藏的内容必须先由管理员恢复，不能通过新修订或举报处理旁路重新公开。

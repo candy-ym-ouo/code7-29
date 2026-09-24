@@ -128,7 +128,10 @@ export async function commentRoutes(app: FastifyInstance) {
       if (!row) throw notFound("Comment not found");
       if (row.author_id !== request.user!.id && !["moderator", "admin"].includes(request.user!.role)) throw forbidden();
       await client.query(
-        "UPDATE comments SET status = 'deleted', deleted_at = now(), updated_at = now() WHERE id = $1",
+        `UPDATE comments
+         SET status = 'deleted', deleted_at = now(), updated_at = now(),
+             hidden_by = NULL, hidden_by_level = NULL, hidden_reason_code = NULL, hidden_at = NULL
+         WHERE id = $1`,
         [params.id]
       );
       await recordAudit(client, {

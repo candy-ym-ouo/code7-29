@@ -345,6 +345,9 @@ export async function featureRoutes(app: FastifyInstance) {
       if (!row) throw notFound("Feature not found");
       if (row.owner_id !== userId) throw forbidden();
       if (row.status === "deleted") throw conflict("Deleted content cannot be revised");
+      // 被隐藏的内容不得通过创建新修订来重新进入审核/发布流程；
+      // 必须先由有权限者恢复（管理员隐藏只能由管理员恢复）。
+      if (row.status === "hidden") throw conflict("Hidden content cannot be revised until it is restored");
       const category = await client.query("SELECT 1 FROM categories WHERE key = $1 AND is_active = true", [input.categoryKey]);
       if (!category.rowCount) throw new AppError(400, "VALIDATION_FAILED", "Unknown or inactive category");
       const pending = await client.query(
@@ -418,7 +421,10 @@ export async function featureRoutes(app: FastifyInstance) {
       );
 
       await client.query(
-        "UPDATE map_features SET status = 'deleted', deleted_at = now(), updated_at = now() WHERE id = $1",
+        `UPDATE map_features
+         SET status = 'deleted', deleted_at = now(), updated_at = now(),
+             hidden_by = NULL, hidden_by_level = NULL, hidden_reason_code = NULL, hidden_at = NULL
+         WHERE id = $1`,
         [params.id]
       );
       if (mediaResult.rowCount) {
@@ -530,6 +536,11 @@ async function submitRevision(revisionId: string | undefined, featureId: string,
     const featureRow = feature.rows[0];
     if (!featureRow) throw notFound("Feature not found");
     if (featureRow.owner_id !== userId) throw forbidden();
+    // 隐藏状态下的任何版本都不能提交审核：批准修订会重新公开，
+    // 这里直接阻断“隐藏后靠新修订翻案”的供弹路径。
+    if (featureRow.status === "hidden") {
+      throw conflict("Hidden content cannot be resubmitted until it is restored");
+    }
 
     const revision = revisionId
       ? await client.query<{ id: string; status: string; payload: unknown }>(
