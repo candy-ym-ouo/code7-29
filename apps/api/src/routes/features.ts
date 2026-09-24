@@ -556,7 +556,14 @@ async function submitRevision(revisionId: string | undefined, featureId: string,
       [revisionRow.id]
     );
     if (!featureRow.current_revision_id) {
-      await client.query("UPDATE map_features SET status = 'pending', updated_at = now() WHERE id = $1", [featureId]);
+      // 隐藏中的内容重新提交只进入待审核，不解除隐藏。
+      await client.query(
+        `UPDATE map_features
+         SET status = CASE WHEN status = 'hidden'::content_status THEN 'hidden'::content_status ELSE 'pending'::content_status END,
+             updated_at = now()
+         WHERE id = $1`,
+        [featureId]
+      );
     }
   });
 }

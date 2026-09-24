@@ -102,7 +102,7 @@ async function approveMedia(id: string) {
 }
 
 async function resolveReport(id: string) {
-  const actionRaw = window.prompt("处理动作：none、hide、restore", "none") ?? "none";
+  const actionRaw = window.prompt("处理动作：none、hide、restore（管理员隐藏的内容仅管理员可恢复）", "none") ?? "none";
   const statusRaw = window.prompt("处理结果：resolved 或 dismissed", actionRaw === "none" ? "dismissed" : "resolved") ?? "dismissed";
   if (!["none", "hide", "restore"].includes(actionRaw) || !["resolved", "dismissed"].includes(statusRaw)) return;
   try {
@@ -137,7 +137,7 @@ onMounted(load);
 
     <div v-if="active === 'features'" class="moderation-grid">
       <article v-for="item in queue.features" :key="item.revision_id" class="card"><div class="card-body">
-        <div class="inline"><span class="badge pending">待审核</span><span class="badge">{{ item.payload.categoryKey }}</span></div>
+        <div class="inline"><span class="badge pending">待审核</span><span class="badge">{{ item.payload.categoryKey }}</span><span v-if="item.feature_status === 'hidden'" class="badge hidden">已隐藏·批准不会公开</span></div>
         <h3>{{ item.payload.title }}</h3>
         <p>{{ item.payload.description }}</p>
         <p class="muted">作者：{{ item.author_name }} · 修订 {{ item.revision_no }} · {{ new Date(item.submitted_at).toLocaleString() }}</p>

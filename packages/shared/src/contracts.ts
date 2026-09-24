@@ -26,6 +26,24 @@ export type ContentStatus = (typeof CONTENT_STATUSES)[number];
 export const COMMENT_STATUSES = ["pending", "published", "rejected", "hidden", "deleted"] as const;
 export type CommentStatus = (typeof COMMENT_STATUSES)[number];
 
+export const HIDE_SOURCES = ["system", "moderator", "admin"] as const;
+export type HideSource = (typeof HIDE_SOURCES)[number];
+
+const HIDE_SOURCE_RANK: Record<HideSource, number> = { system: 1, moderator: 2, admin: 3 };
+const ROLE_RANK: Record<UserRole, number> = { contributor: 0, moderator: 2, admin: 3 };
+
+/** 隐藏来源等级只升不降：更高等级来源覆盖更低等级来源。 */
+export function strongestHideSource(current: HideSource | null, next: HideSource): HideSource {
+  if (!current) return next;
+  return HIDE_SOURCE_RANK[next] >= HIDE_SOURCE_RANK[current] ? next : current;
+}
+
+/** 统一恢复规则：操作者角色等级必须不低于隐藏来源等级。 */
+export function canRestoreHiddenContent(role: UserRole, source: HideSource | null): boolean {
+  if (!source) return true;
+  return ROLE_RANK[role] >= HIDE_SOURCE_RANK[source];
+}
+
 export const MEDIA_STATUSES = [
   "quarantined",
   "scanning",

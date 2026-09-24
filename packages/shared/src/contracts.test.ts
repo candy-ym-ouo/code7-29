@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { featurePayloadSchema, privacyRegionSchema } from "./contracts";
+import {
+  canRestoreHiddenContent,
+  featurePayloadSchema,
+  privacyRegionSchema,
+  strongestHideSource
+} from "./contracts";
 
 describe("featurePayloadSchema", () => {
   it("accepts a valid bench", () => {
@@ -60,5 +65,26 @@ describe("feature media ids", () => {
       mediaIds: [id, id]
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("hide source ranking", () => {
+  it("only escalates hide sources", () => {
+    expect(strongestHideSource(null, "system")).toBe("system");
+    expect(strongestHideSource("system", "moderator")).toBe("moderator");
+    expect(strongestHideSource("moderator", "admin")).toBe("admin");
+    expect(strongestHideSource("admin", "system")).toBe("admin");
+    expect(strongestHideSource("admin", "moderator")).toBe("admin");
+    expect(strongestHideSource("moderator", "system")).toBe("moderator");
+  });
+
+  it("requires actor rank at least the hide source rank to restore", () => {
+    expect(canRestoreHiddenContent("moderator", "system")).toBe(true);
+    expect(canRestoreHiddenContent("moderator", "moderator")).toBe(true);
+    expect(canRestoreHiddenContent("moderator", "admin")).toBe(false);
+    expect(canRestoreHiddenContent("admin", "admin")).toBe(true);
+    expect(canRestoreHiddenContent("admin", "system")).toBe(true);
+    expect(canRestoreHiddenContent("contributor", "system")).toBe(false);
+    expect(canRestoreHiddenContent("contributor", null)).toBe(true);
   });
 });

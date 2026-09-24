@@ -75,16 +75,18 @@
 
 ## 审核接口
 
+隐藏与恢复遵循统一规则：内容被隐藏时记录来源等级（`system` 举报阈值 < `moderator` 审核员 < `admin` 管理员，重复隐藏只升不降）；`hidden → published` 只能经由恢复入口，且操作者角色等级不得低于隐藏来源等级——管理员隐藏的内容仅管理员可恢复。批准隐藏内容的修订只切换版本，不会解除隐藏。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/moderation/queue` | 内容、评论、媒体和举报队列 |
-| `POST` | `/moderation/features/:id/approve` | 批准内容或修订 |
+| `POST` | `/moderation/features/:id/approve` | 批准内容或修订（隐藏内容保持隐藏） |
 | `POST` | `/moderation/features/:id/reject` | 拒绝 |
 | `POST` | `/moderation/features/:id/request-changes` | 要求修改 |
-| `POST` | `/moderation/features/:id/hide` | 隐藏 |
-| `POST` | `/moderation/features/:id/restore` | 管理员恢复 |
+| `POST` | `/moderation/features/:id/hide` | 隐藏（记录来源等级） |
+| `POST` | `/moderation/features/:id/restore` | 恢复（等级不低于隐藏来源） |
 | `POST` | `/moderation/comments/:id/approve` | 批准评论 |
 | `POST` | `/moderation/comments/:id/reject` | 拒绝评论 |
 | `POST` | `/moderation/comments/:id/hide` | 隐藏评论 |
-| `POST` | `/moderation/reports/:id/resolve` | 处理举报 |
+| `POST` | `/moderation/reports/:id/resolve` | 处理举报（恢复动作同样校验等级） |
 | `GET` | `/moderation/audit` | 管理员审计日志 |

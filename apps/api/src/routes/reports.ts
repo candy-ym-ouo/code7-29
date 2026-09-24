@@ -2,10 +2,11 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { reportCreateSchema } from "@map/shared/contracts";
 import { query, transaction } from "../db";
-import { AppError, conflict, notFound } from "../errors";
+import { conflict, notFound } from "../errors";
 import { requireAuth } from "../auth";
 import { recordAudit } from "../audit";
 import { notifyUser } from "../notifications";
+import { applyHide } from "../moderation-policy";
 
 export async function reportRoutes(app: FastifyInstance) {
   app.post("/reports", { preHandler: requireAuth }, async (request, reply) => {
@@ -45,17 +46,19 @@ export async function reportRoutes(app: FastifyInstance) {
         [input.targetType, input.targetId]
       );
       if (count.rows[0]!.count >= 3) {
-        if (input.targetType === "feature") {
-          await client.query("UPDATE map_features SET status = 'hidden', updated_at = now() WHERE id = $1", [input.targetId]);
-        } else {
-          await client.query("UPDATE comments SET status = 'hidden', updated_at = now() WHERE id = $1", [input.targetId]);
-        }
+        await applyHide(client, {
+          target: input.targetType,
+          id: input.targetId,
+          source: "system",
+          actorId: null,
+          reasonCode: "REPORT_THRESHOLD"
+        });
         await recordAudit(client, {
           actorId: null,
           action: "report.threshold_hidden",
           resourceType: input.targetType,
           resourceId: input.targetId,
-          metadata: { openReports: count.rows[0]!.count }
+          metadata: { openReports: count.rows[0]!.count, hiddenSource: "system" }
         });
       }
       if (ownerId && ownerId !== request.user!.id) {
